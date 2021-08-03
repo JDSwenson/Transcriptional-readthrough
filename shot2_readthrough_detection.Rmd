@@ -1,0 +1,395 @@
+---
+title: "shot2_readthrough_detection"
+author: "John Swenson"
+date: "8/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Chunk 5: Prepare files for analysis
+```{r Prep files}
+library(edgeR)
+library(tidyverse)
+library(statmod)
+library(RColorBrewer)
+library(pheatmap)
+library(ggpubr)
+
+#rm(list=ls()) #Clear working environment
+
+# ----------Read in files-------------------
+#Set working directory to location of the reference bed file expressed_genes_upstream_region.bed AND intersect.bed files just generated. Paste the path between the quotes in the setwd command and the path="" argument in the two list.files command below.
+
+setwd("")
+#Save names of count files for upstream genic region for each sample
+files1 <- list.files(path = "", pattern = "*100bp_upstream.intersect.bed", full.names = F)
+
+#Save names of count files for downstream readthrough region for each sample
+files2 <- list.files(path = "", pattern = "*100bp_downstream.intersect.bed", full.names = F)
+
+#Gene boundaries for join
+f_boundaries <- read_tsv("expressed_genes_upstream_region.bed", col_names=FALSE)
+colnames(f_boundaries)[c(1:4, 6)] <- c("chr", "start", "stop", "gene", "strand")
+
+#select only columns of interest
+f_boundaries <- f_boundaries %>% select(chr, start, stop, gene, strand)
+
+##Import as a list count matrices for upstream genic region for each sample
+f_genes <- sapply(files1, read_tsv, simplify=FALSE, col_names = FALSE)
+
+##Import as a list count matrices for downstream readthrough region for each sample
+f_readthrough <- sapply(files2, read_tsv, simplify=FALSE, col_names = FALSE)
+
+#samples <- names(f_genes) #Save names of files
+sample_names <- c("h1_4_H1", "h1_4_H2", "h1_4_H3", "h1_4_RT1", "h1_4_RT2", "h1_4_RT3", "sh2_H1", "sh2_H2", "sh2_H3", "sh2_RT1", "sh2_RT2", "sh2_RT3")
+
+#Rename columns for each dataframe - gene column = gene name, count column = sample name
+for(i in 1:length(f_genes)){
+  colnames(f_genes[[i]])[4] = colnames(f_readthrough[[i]])[4] <- "gene"
+  colnames(f_genes[[i]])[11] = colnames(f_readthrough[[i]])[11] <- sample_names[i]
+}
+
+#select only columns with gene names and counts
+for(j in 1:length(f_genes)){
+  f_genes[[j]] <- f_genes[[j]] %>% 
+    select(4, 11)
+f_readthrough[[j]] <- f_readthrough[[j]] %>% 
+  select(4, 11)
+  }
+
+#---------Combine counts matrices from all samples into one---------------
+#Combine all dataframes from list to make matrix of counts
+##Upstream genic region
+gene_counts <- plyr::join_all(f_genes, by = "gene", type = "full") %>% 
+  as_tibble()
+
+#Downstream readthrough region
+readthrough_counts <- plyr::join_all(f_readthrough, by = "gene", type = "full") %>% 
+  as_tibble()
+
+nrow(gene_counts)
+nrow(readthrough_counts) #should be the same
+
+nrow(gene_counts[gene_counts$h1_4_H3 > 20,]) #How many genes have >20 counts (can change number)
+nrow(readthrough_counts[readthrough_counts$h1_4_H3 > 20,]) #How many readthrough regions have >20 counts: should be less than above
+
+#Add 1 read to every gene that has 0 so we can calculate ratios and not get NA
+gene_counts[gene_counts == 0] <- 1
+
+#------------Calculate all ratios then split into treatment---------------
+#For each gene, get the ratio of reads mapping to the "readthrough" region vs reads mapping to the gene
+ratios <- cbind(gene = gene_counts$gene, round(readthrough_counts[,2:13] / gene_counts[,2:13], 2))
+
+#Change infinite and NaN values to NA
+#ratios[mapply(is.infinite, ratios)] <- NA
+#ratios[mapply(is.nan, ratios)] <- NA
+
+#Add mean ratio for each gene to a new column
+ratios$means <- rowMeans(ratios[,2:13], na.rm = TRUE)
+
+#How many genes have more readthrough than normal gene expression
+nrow(ratios[ratios$means > 1,])
+nrow(ratios[ratios$means < 1,])
+
+#Split up by treatment
+h1_4_H <- ratios[,1:4]
+h1_4_RT <- ratios[,c(1,5:7)]
+sh2_H <- ratios[,c(1,8:10)]
+sh2_RT <- ratios[,c(1, 11:13)]
+
+#Take means for each row (gene)
+h1_4_H$means <- rowMeans(h1_4_H[,2:4], na.rm = TRUE)
+h1_4_RT$means <- rowMeans(h1_4_RT[,2:4], na.rm = TRUE)
+sh2_H$means <- rowMeans(sh2_H[,2:4], na.rm = TRUE)
+sh2_RT$means <- rowMeans(sh2_RT[,2:4], na.rm = TRUE)
+
+#--------------Create filtered dataset----------------
+#Filter 1: Must have 5 intersecting counts (can change)
+filt <- 5
+
+#Make second dataframe of filtered counts for genic regions
+gene_counts_filt <- gene_counts
+gene_counts_filt[gene_counts_filt < filt] <- 1 #set all instances where counts in the genic region are fewer than five to 1, so ratio will end up being 0
+
+#Make second dataframe of filtered counts for readthrough regions
+readthrough_counts_filt <- readthrough_counts
+readthrough_counts_filt[readthrough_counts_filt < filt] <- 0 #set all instances where counts in the readthrough region are fewer than five to 0, so ratio will end up being 0
+
+#Make dataframe of filtered ratios of genic:readthrough regions
+ratios_filt <- cbind(gene = gene_counts_filt$gene, round(readthrough_counts_filt[,2:13] / gene_counts_filt[,2:13], 2))
+
+#Take mean counts of genic region intersect to make it easier to query by treatment
+mean_counts <- gene_counts_filt %>% rowwise() %>% 
+  mutate(h1_4_H_mean = mean(c(h1_4_H1, h1_4_H2, h1_4_H3))) %>% 
+  mutate(h1_4_RT_mean = mean(c(h1_4_RT1, h1_4_RT2, h1_4_RT3))) %>% 
+  mutate(sh2_H_mean = mean(c(sh2_H1, sh2_H2, sh2_H3))) %>% 
+  mutate(sh2_RT_mean = mean(c(sh2_RT1, sh2_RT2, sh2_RT3))) %>% 
+  select(gene, h1_4_H_mean, h1_4_RT_mean, sh2_H_mean, sh2_RT_mean) %>% 
+  as_tibble()
+
+#Take mean counts of downstream ("readthrough") region intersect to make it easier to query by treatment
+mean_readthrough <- readthrough_counts_filt %>% rowwise() %>% 
+  mutate(h1_4_H_mean = mean(c(h1_4_H1, h1_4_H2, h1_4_H3))) %>% 
+  mutate(h1_4_RT_mean = mean(c(h1_4_RT1, h1_4_RT2, h1_4_RT3))) %>% 
+  mutate(sh2_H_mean = mean(c(sh2_H1, sh2_H2, sh2_H3))) %>% 
+  mutate(sh2_RT_mean = mean(c(sh2_RT1, sh2_RT2, sh2_RT3))) %>% 
+  select(gene, h1_4_H_mean, h1_4_RT_mean, sh2_H_mean, sh2_RT_mean) %>% 
+  as_tibble()
+
+#Take mean ratios of downstream "readthrough" region to upstream genic region to make it easier to query by treatment
+mean_ratios <- ratios_filt %>% rowwise() %>% 
+  mutate(h1_4_H_mean = mean(c(h1_4_H1, h1_4_H2, h1_4_H3))) %>% 
+  mutate(h1_4_RT_mean = mean(c(h1_4_RT1, h1_4_RT2, h1_4_RT3))) %>% 
+  mutate(sh2_H_mean = mean(c(sh2_H1, sh2_H2, sh2_H3))) %>% 
+  mutate(sh2_RT_mean = mean(c(sh2_RT1, sh2_RT2, sh2_RT3))) %>% 
+  select(gene, h1_4_H_mean, h1_4_RT_mean, sh2_H_mean, sh2_RT_mean) %>% 
+  as_tibble()
+
+#Spot-check any gene of interest
+mean_counts[mean_counts$gene == "AT1G53540",]
+mean_readthrough[mean_readthrough$gene == "AT1G53540",]
+mean_ratios[mean_ratios$gene == "AT1G53540",]
+
+#Split up ratios by treatment after filtering for low read counts 
+h1_4_H_filt <- ratios_filt[,1:4]
+h1_4_RT_filt <- ratios_filt[,c(1,5:7)]
+sh2_H_filt <- ratios_filt[,c(1,8:10)]
+sh2_RT_filt <- ratios_filt[,c(1, 11:13)]
+```
+
+
+#### Chunk 6: Plot histograms of the data
+```{r Plot the data}
+#-----------Plot all ratios for individual samples AFTER filtering for low counts-------------
+#Make new columns for treatments so they can be plotted separately
+#Focus on heated treatments
+h1_4_H2_filt <- h1_4_H_filt %>% 
+  mutate(sample1 = ifelse(h1_4_H1 >= 1, 1, h1_4_H1),
+         sample2 = ifelse(h1_4_H2 >= 1, 1, h1_4_H2),
+         sample3 = ifelse(h1_4_H3 >= 1, 1, h1_4_H3)) %>% 
+  select(gene, sample1, sample2, sample3)
+
+sh2_H2_filt <- sh2_H_filt %>% 
+  mutate(sample1 = ifelse(sh2_H1 >= 1, 1, sh2_H1),
+         sample2 = ifelse(sh2_H2 >= 1, 1, sh2_H2),
+         sample3 = ifelse(sh2_H3 >= 1, 1, sh2_H3)) %>% 
+  select(gene, sample1, sample2, sample3)
+
+h1_4_H_plot_1_filt <- ggplot(data = h1_4_H2_filt, aes(x = sample1)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "h1-4 Heated Sample 1", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+h1_4_H_plot_2_filt <- ggplot(data = h1_4_H2_filt, aes(x = sample2)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "h1-4 Heated Sample 2", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+h1_4_H_plot_3_filt <- ggplot(data = h1_4_H2_filt, aes(x = sample3)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "h1-4 Heated Sample 3", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+sh2_H_plot_1_filt <- ggplot(data = sh2_H2_filt, aes(x = sample1)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "sh2 Heated Sample 1", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+sh2_H_plot_2_filt <- ggplot(data = sh2_H2_filt, aes(x = sample2)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "sh2 Heated Sample 2", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+sh2_H_plot_3_filt <- ggplot(data = sh2_H2_filt, aes(x = sample3)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "sh2 Heated Sample 3", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+plotlist_H_filt <- list(h1_4_H_plot_1_filt, h1_4_H_plot_2_filt, h1_4_H_plot_3_filt, sh2_H_plot_1_filt, sh2_H_plot_2_filt, sh2_H_plot_3_filt)
+
+#Plot list
+p_heated_filt <- ggarrange(plotlist = plotlist_H_filt)
+annotate_figure(p_heated_filt,
+                top = text_grob("Filtered for counts > 5", size = 20))
+```
+
+
+#### Chunk 7: Identify putative genes showing transcriptional readthrough
+```{r ID genes with transcriptional readthrough}
+#-------Create lists of differentially expressed genes to compare to readthrough---------
+#This is a reiteration of some of the code from above, but only includes the part relevant for comparing to readthrough.
+#Set working directory to location of counts data matrix
+setwd("")
+
+library(edgeR)
+library(tidyverse)
+library(statmod)
+library(RColorBrewer)
+library(pheatmap)
+library(ggpubr)
+
+#-------------READ IN DATA------------------------
+counts <- data.frame(data.matrix(read.table(file="all_counts_stranded.matrix"))) #Import count data to R
+
+head(counts) #Make sure that samples are ordered the same as the vector in the line below (i.e. make sure the samples will be names appropriately)
+
+#rename column names to sample names
+colnames(counts) <- c("h1-4-H1_S10", "h1-4-H2_S12", "h1-4-H3_S3", "h1-4-RT1_S1", "h1-4-RT2_S6", "h1-4-RT3_S8","sh2-H1_S11", "sh2-H2_S2", "sh2-H3_S4", "sh2-RT1_S5", "sh2-RT2_S7", "sh2-RT3_S9")
+
+#--------------DGE analysis by treatment---------------
+#Group replicate samples
+group <- factor(c(rep(c("h1.4_H", "h1.4_RT", "sh2_H", "sh2_RT"), each = 3))) 
+
+y <- DGEList(counts = counts, group = group) #Create DGEList object with groups
+
+#Filter out lowly expressed genes that will mess up comparisons
+keep <- filterByExpr(y)
+y <- y[keep,,keep.lib.sizes=FALSE]
+
+#Set parameters and fit model
+y <- calcNormFactors(y) #Normalize library sizes to account for some samples having genes that absorb a disproportionate amount of read depth
+design <- model.matrix(~0+group) #Create design matrix (0+ replaces the intercept with a group)
+y <- estimateDisp(y, design, robust=TRUE) #Estimate dispersion for negative binomial model
+
+fit <- glmQLFit(y, design, robust=TRUE) #Fit the negative binomial model
+
+#Make design matrix for all pairwise comparisons
+comparisons <- makeContrasts(h1.4_H_vs_h1.4_RT = grouph1.4_H - grouph1.4_RT,
+                             sh2_H_vs_h1.4_H = groupsh2_H - grouph1.4_H,
+                             h1.4_H_vs_sh2_RT = grouph1.4_H - groupsh2_RT,
+                             h1.4_RT_vs_sh2_H = grouph1.4_RT - groupsh2_H,
+                             h1.4_RT_vs_sh2_RT = grouph1.4_RT - groupsh2_RT,
+                             sh2_H_vs_sh2_RT = groupsh2_H - groupsh2_RT,
+                             levels=design)
+
+counts_per_mil <- cpm(y, log=FALSE) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "gene") %>%
+  select(gene, h1_4_H1_cpm=`h1-4-H1_S10`, h1_4_H2_cpm=`h1-4-H2_S12`, h1_4_H3_cpm=`h1-4-H3_S3`,h1_4_RT1_cpm=`h1-4-RT1_S1`, h1_4_RT2_cpm=`h1-4-RT2_S6`, h1_4_RT3_cpm=`h1-4-RT3_S8`, sh2_H1_cpm=`sh2-H1_S11`, sh2_H2_cpm=`sh2-H2_S2`, sh2_H3_cpm=`sh2-H3_S4`, sh2_RT1_cpm=`sh2-RT1_S5`, sh2_RT2_cpm=`sh2-RT2_S7`, sh2_RT3_cpm=`sh2-RT3_S9`) %>% 
+  mutate_at(2:13, ~ round(., 0))
+
+#Calculate mean counts per million per treatment
+# mean_cpm <- cpm(y, log=FALSE) %>% 
+#   as.data.frame() %>% 
+#   rownames_to_column(var = "gene") %>% 
+#   rowwise() %>% 
+#   mutate(h1_4_H_mean_cpm = mean(c(`h1-4-H1_S10`, `h1-4-H2_S12`, `h1-4-H3_S3`))) %>% 
+#   mutate(h1_4_RT_mean_cpm = mean(c(`h1-4-RT1_S1`, `h1-4-RT2_S6`, `h1-4-RT3_S8`))) %>% 
+#   mutate(sh2_H_mean_cpm = mean(c(`sh2-H1_S11`, `sh2-H2_S2`, `sh2-H3_S4`))) %>% 
+#   mutate(sh2_RT_mean_cpm = mean(c(`sh2-RT1_S5`, `sh2-RT2_S7`, `sh2-RT3_S9`))) %>% 
+#   select(gene, h1_4_H_mean_cpm, h1_4_RT_mean_cpm, sh2_H_mean_cpm, sh2_RT_mean_cpm)
+
+##Temp comparison 1: h1.4_H_vs_h1.4_RT
+#Perform differential expression analysis
+qlf_h1.4_H_vs_h1.4_RT <- glmQLFTest(fit, contrast=comparisons[,"h1.4_H_vs_h1.4_RT"]) 
+
+#Show number of genes differentially expressed (up and down)
+summary(decideTestsDGE(qlf_h1.4_H_vs_h1.4_RT)) 
+
+#Extract all differentially expressed genes at FDR < 0.05 differentially expressed genes (DEGs) - set n to number of genes in dataset so all are included
+h1_4_HS <- topTags(qlf_h1.4_H_vs_h1.4_RT, n=17243)
+#Convert to dataframe and filter for DE in heated, 
+h1_4_HS <- h1_4_HS %>% as.data.frame() %>% 
+  rownames_to_column(var = "gene") %>% 
+  mutate(DE_in_h1_4_HS = ifelse(FDR < 0.05 & logFC > 0, "yes", "no")) %>%
+  select(gene, DE_in_h1_4_HS, logFC_h1_4_HS = logFC, FDR_h1_4_HS = FDR)
+
+###Temp comparison 2: sh2_H_vs_sh2_RT
+qlf_sh2_H_vs_sh2_RT <- glmQLFTest(fit, contrast=comparisons[,"sh2_H_vs_sh2_RT"]) #
+
+#Show number of genes differentially expressed (up and down)
+summary(decideTestsDGE(qlf_sh2_H_vs_sh2_RT)) 
+
+#Set n high so the limit is the p_value cutoff
+sh2_HS <- topTags(qlf_sh2_H_vs_sh2_RT, n=17243)
+#Convert to dataframe and filter for DE in heated, 
+sh2_HS <- sh2_HS %>% as.data.frame() %>% 
+  rownames_to_column(var = "gene") %>% 
+  mutate(DE_in_sh2_HS = ifelse(FDR < 0.05 & logFC > 0, "yes", "no")) %>%
+  select(gene, DE_in_sh2_HS, logFC_sh2_HS = logFC, FDR_sh2_HS = FDR)
+
+##Mutant comparison in heated: h1.4_H_vs_sh2_H
+qlf_sh2_H_vs_h1.4_H <- glmQLFTest(fit, contrast=comparisons[,"sh2_H_vs_h1.4_H"]) 
+
+#Show number of genes differentially expressed (up and down)
+summary(decideTestsDGE(qlf_h1.4_H_vs_sh2_H)) 
+
+#Set n high so the limit is the p_value cutoff
+sh2_v_h1_4_HS <- topTags(qlf_sh2_H_vs_h1.4_H, n=17243)
+
+#Convert to dataframe and filter for DE in heated, 
+sh2_v_h1_4_HS <- sh2_v_h1_4_HS %>% as.data.frame() %>% 
+  rownames_to_column(var = "gene") %>% 
+  mutate(DE_in_sh2_HS_v_h1_4_HS = ifelse(FDR < 0.05 & logFC > 0, "yes", "no")) %>%
+  select(gene, DE_in_sh2_HS_v_h1_4_HS, logFC_sh2_HS_v_h1_4_HS = logFC, FDR_sh2_HS_v_h1_4_HS = FDR)
+
+#------------Identify putative "readthrough genes"--------------
+#Filter 2:  filter counts by differentially expressed genes in heated treatments
+#Filter 3: filter by readthrough:genic region ratios
+##Set ratio filters
+
+###var1 is minimum ratio required to identify the gene as one likely showing readthrough
+var1 <- 0.25
+
+###var2 is the maximum ratio allowed for a gene to NOT be considered a likely readthrough gene.
+var2 <- 0.1
+
+#NOTE: 0.1 is a good number to serve as a max for genes unlikely to show readthrough. In the code below, h1_4_RT_mean and sh2_RT_mean must be <0.1. We do this so we don't capture genes with readthrough that is uncorrelated with one of our treatments, or adjacent genes that may register as readthrough in all treatments. The lower bound used for ratios to identify genes showing readthrough in treatments (temperature and sh2 mutant) is set to 0.25. This can be increased for stringency (at the risk of excluding biologically relevant information) or decreased to make it more lax (at the risk of including genes that do not show transcriptional readthrough.
+
+#----------------Filtered by DE in heated---------------
+#Create dataframe of all ratios, logFC values, whether DE or not, and cpm
+all_readthrough_ratios_and_DE_scores <- mean_ratios %>% left_join(h1_4_HS, by = "gene") %>%
+  left_join(sh2_HS, by = "gene") %>% 
+  left_join(sh2_v_h1_4_HS, by = "gene") %>% 
+  left_join(counts_per_mil, by = "gene") %>% 
+  as.data.frame()
+
+write.csv(all_ratios, file="all_readthrough_ratios_and_DE_scores.csv", row.names=FALSE)
+
+
+##Compare readthrough genes to DEGs in sh2 treatment. Which genes show readthrough in sh2 heated and NOT sh2 RT (ignore h1-4)
+sh2_readthrough_candidates_and_DE_scores <- all_ratios %>% 
+  #filter(DE_in_sh2_HS == "yes") %>% #Uncomment if want to filter out non-DE genes
+  mutate(readthrough_candidate=ifelse(sh2_H_mean_ratio > var1 & sh2_RT_mean_ratio < var2, "yes", "no")) %>% 
+  inner_join(f_boundaries, by = "gene") %>% #add chromosome position
+  select(gene, chr, stop, strand, sh2_H_mean_ratio, sh2_RT_mean_ratio, logFC_sh2_HS, FDR_sh2_HS,DE_in_sh2_HS, readthrough_candidate) %>% #select relevant columns
+  mutate_at(5:7, ~ round(., 2)) %>% 
+  arrange(desc(logFC_sh2_HS)) %>% #sort by descending logFC value
+  as.data.frame() #convert to dataframe for visualizing in console
+    
+write.csv(sh2_readthrough_candidates_and_DE_scores, file="sh2_readthrough_candidates_and_DE_scores.csv", row.names=FALSE)
+  
+##Compare readthrough genes to DEGs in h1-4. Which genes show readthrough in h1-4 heated and NOT h1-4 RT (ignore sh2)
+h1_4_readthrough_candidates_and_DE_scores <- all_ratios %>% 
+  #filter(DE_in_h1_4_HS == "yes") %>%#Uncomment if want to filter out non-DE genes
+  mutate(readthrough_candidate=ifelse(h1_4_H_mean_ratio > var1 & h1_4_RT_mean_ratio < var2, "yes", "no")) %>% 
+  inner_join(f_boundaries, by = "gene") %>% #add chromosome position
+  select(gene, chr, stop, strand, h1_4_H_mean_ratio, h1_4_RT_mean_ratio, logFC_h1_4_HS, FDR_h1_4_HS, DE_in_h1_4_HS, readthrough_candidate) %>% #select relevant columns
+  mutate_at(5:7, ~ round(., 2)) %>% 
+  arrange(desc(logFC_h1_4_HS)) %>% #sort by descending logFC value
+  as.data.frame() #convert to dataframe for visualizing in console
+    
+write.csv(h1_4_readthrough_candidates_and_DE_scores, file="h1_4_readthrough_candidates_and_DE_scores.csv", row.names=FALSE)
+
+##Compare readthrough genes to DEGs in sh2 and h1-4 heat stress treatments. Which genes show readthrough in sh2 heat stress and NOT h1-4 heat stress (ignore room temp)
+sh2_HS_v_h1_4_HS_readthrough_candidates_and_DE_scores <- all_ratios %>% 
+  #filter(DE_in_sh2_HS_v_h1_4_HS == "yes") %>% #Uncomment if want to filter out non-DE genes
+  mutate(readthrough_candidate=ifelse(sh2_H_mean_ratio > var1 & h1_4_H_mean_ratio < var2, "yes", "no")) %>% 
+  inner_join(f_boundaries, by = "gene") %>% #add chromosome position
+  select(gene, chr, stop, strand, h1_4_H_mean_ratio, sh2_H_mean_ratio, logFC_sh2_HS_v_h1_4_HS, FDR_sh2_HS_v_h1_4_HS, DE_in_sh2_HS_v_h1_4_HS, readthrough_candidate) %>% #select relevant columns
+  mutate_at(5:7, ~ round(., 2)) %>% 
+  arrange(desc(logFC_sh2_HS_v_h1_4_HS)) %>% #sort by descending logFC value
+  as.data.frame() #convert to dataframe for visualizing in console
+    
+write.csv(sh2_HS_v_h1_4_HS_readthrough_candidates_and_DE_scores, file="sh2_HS_v_h1_4_HS_readthrough_candidates_and_DE_scores.csv", row.names=FALSE)  
+
+# ------- Groundtruth --------
+#Look for row with a specific gene in dataframes of raw counts and ratios after intersect
+gene_counts[gene_counts$gene == "AT1G11265",]
+readthrough_counts[readthrough_counts$gene == "AT1G11265",]
+ratios[ratios$gene == "AT5G12030",]
+f_boundaries[f_boundaries$gene == "AT1G16030",]  
+```
