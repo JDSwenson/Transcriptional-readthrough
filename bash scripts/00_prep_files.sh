@@ -1,13 +1,4 @@
 #!/bin/bash
-#Index reference genome 
-
-#BSUB -q short
-#BSUB -W 4:00
-#BSUB -R rusage[mem=16000]
-#BSUB -n 4
-#BSUB -R span[hosts=1]
-#BSUB -e logs/00_prep_files.err
-#BSUB -oo logs/00_prep_files.log
 
 #Load required modules
 module load gcc/8.1.0
@@ -36,8 +27,9 @@ gffread -T references/TAIR10_GFF3_genes.gff -o references/TAIR10_genes.gtf
 
 wait
 
-#I.2.2) Index genome using STAR's algorithm, called via RSEM, so it's compatible with both programs
-rsem-prepare-reference --gtf references/TAIR10_genes.gtf references/TAIR10_chr_all.fas 00_genome_index/rsem_TAIR10 --star -p 4
+#I.2.2) Index genome file
+hisat2-build TAIR10_ChrAll.fas Tair10idx
+
 
 #I.2.3) Prepare annotation file for downstream use with bedtools
 ##Convert gff annotation file to bed file
