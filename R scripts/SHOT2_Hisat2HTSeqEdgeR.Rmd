@@ -1,0 +1,946 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+#### Chunk 1: Initial setup
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+# 
+# rm(list=ls()) #Clear workspace
+# 
+# #Install bioconductor to install edgeR - run below two lines together
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("edgeR") #Install edgeR from Bioconductor
+# browseVignettes("edgeR") #Look up edgeR vigenette (if desired)
+# 
+# install.packages(c("tidyverse","statmod","RColorBrewer", "pheatmap", "ggpubr")) #Install other packages from CRAN
+```
+
+EdgeR DGE analysis
+#### Chunk 2: Fit model and visualize data
+```{r Fit model and visualize data}
+library(limma)
+library(edgeR)
+library(tidyverse)
+library(statmod)
+library(RColorBrewer)
+library(pheatmap)
+library(ggpubr)
+
+#Set working directory to location of counts matrix and gene_boundaries bed file: provide path between quotes
+#setwd("")
+
+#-------------READ IN DATA------------------------
+counts <- data.frame(read.table(file="all_HTseq.txt", header = TRUE, row.names = 1)) #Import count data to R
+
+head(counts) #Make sure that samples are ordered the same as the vector in the line below (i.e. make sure the samples will be names appropriately)
+
+
+#--------------DGE analysis by treatment---------------
+#Group replicate samples
+group <- factor(c(rep(c("h1.4_RT", "sh2_RT", "h1.4_H", "sh2_H"), each = 3)), levels = c("h1.4_RT", "sh2_RT", "h1.4_H", "sh2_H"), ordered = TRUE) 
+
+y <- DGEList(counts = counts, group = group) #Create DGEList object with groups
+
+#Filter out lowly expressed genes that will mess up comparisons
+keep <- filterByExpr(y)
+table(keep) #How many genes are filtered?
+y <- y[keep,,keep.lib.sizes=FALSE]
+
+#Set parameters and fit model
+y <- calcNormFactors(y) #Normalize library sizes to account for some samples having genes that absorb a disproportionate amount of read depth
+design <- model.matrix(~0+group) #Create design matrix (0+ replaces the intercept with a group)
+y <- estimateDisp(y, design, robust=TRUE) #Estimate dispersion for negative binomial model
+
+fit <- glmQLFit(y, design, robust=TRUE) #Fit the negative binomial model
+
+#Make design matrix for all pairwise comparisons
+comparisons <- makeContrasts(h1.4_H_vs_h1.4_RT = grouph1.4_H - grouph1.4_RT,
+                             sh2_H_vs_h1.4_H = groupsh2_H - grouph1.4_H,
+                             h1.4_H_vs_sh2_RT = grouph1.4_H - groupsh2_RT,
+                             h1.4_RT_vs_sh2_H = grouph1.4_RT - groupsh2_H,
+                             sh2_RT_vs_h1.4_RT = groupsh2_RT - grouph1.4_RT,
+                             sh2_H_vs_sh2_RT = groupsh2_H - groupsh2_RT,
+                             levels=design)
+
+#Combine all comparisons into a single F statistic and p-value and examine top tags
+comps <- glmQLFTest(fit, contrast=comparisons)
+topTags(comps)
+
+#------------Plots------------------
+#Make MDS plot to ensure samples group together
+points <- c(rep(c(19,17,19, 17), each=3))
+colors <- c(rep(c("blue", "red"), each = 6))
+plotMDS(y, col=colors, pch=points, cex=1.5)
+legend("top", legend=levels(group), pch=points[c(1,4,7,10)], col=colors[c(1,4,7,10)], cex=1.5, ncol=2)
+
+#Plot quasi-likelihood dispersion estimates - see edgeR manual for interpretation
+plotQLDisp(fit)
+
+##Make heatmap of all comparisons##
+logcpm <- cpm(y, log=TRUE) #calculate counts per million in log2 scale
+logcpm_meanSubtract <- logcpm - rowMeans(logcpm) #subtract the means of rows for each transcript to get log2FC.
+#rownames(logcpm) <- rownames(y$counts) #save gene names as rownames
+#colnames(logcpm) <- paste(y$samples$group, sep="_") #name samples by group
+o <- order(comps$table$PValue) #order differentially expressed genes by p value and save row index value
+logcpm_meanSubtract <- logcpm_meanSubtract[o[1:200],] #extract log2FC of the highest DEGs specified above.
+logcpm <- logcpm[o[1:200],] #extract counts per million of the highest DEGs specified above.
+
+#Creat annotation for heatmaps
+Treatment <- factor(c(rep(c("RT", "Heat"), each =6)))
+Genotype <- factor(c(rep(c("hot1-4", "shot2", "hot1-4", "shot2"), each=3)))
+annotation = data.frame(Genotype, Treatment)
+rownames(annotation) <-colnames(logcpm)
+
+# change the color of annotation to what you want: (eg: "blue", "red")
+Var1        <- c("blue", "red")
+names(Var1) <- c("RT", "Heat")
+anno_colors <- list(Treatment = Var1)
+
+#Create heat map
+symmetric_breaks1 <- seq(-max(abs(logcpm_meanSubtract)), max(abs(logcpm_meanSubtract)), length.out = 101)
+
+pheatmap(logcpm_meanSubtract,
+         color = colorRampPalette(c("blue", "white", "red"))(100), 
+         breaks = symmetric_breaks1, 
+         cluster_cols = FALSE,
+         cutree_rows = 4,
+         show_rownames = F) #filename = "pheatmap_logFC.pdf") # by log2FC
+
+#Figure 3b
+pheatmap(logcpm, 
+         scale="row", 
+         annotation = annotation, 
+         annotation_colors = anno_colors,
+         cluster_cols = FALSE, 
+         show_rownames = F, 
+         cutree_rows = 3,
+         fontsize = 12) # filename = "pheatmap_z.pdf") # Heatmap by z-score looks better
+
+out <- pheatmap(logcpm, scale="row")
+#Re-order original data (genes) to match ordering in heatmap (top-to-bottom)
+rownames(logcpm[out$tree_row[["order"]],])
+
+#If you want something like gene-to-cluster assignment, you can 'cut' your row dendrogram into a pre-selected number of groups as follows:
+#3 groups
+sort(cutree(out$tree_row, k=3))
+sort_cutree <- as.data.frame(sort(cutree(out$tree_row, k=3))) %>% 
+  rownames_to_column(var="AGI")
+
+#Read in Gene name and description from Thalemine araport. Gene name in column 3, gene description is in column 10.
+Top200_araport <- read.csv("Top200_araport.csv", header = FALSE, fill = TRUE) %>% 
+  rename(AGI="V1", Gene="V3", Description="V10") %>% 
+  select(AGI, Gene, Description)
+
+#Join sort_cutree with Top200_araport to add gene name and description to AGI
+sort_cutree <- left_join(sort_cutree, Top200_araport, by="AGI")
+
+#get z-scores of the top 200 DEGs
+logcpm_200 <- t(scale(t(logcpm))) #Scale works only on columns, so transpose should be done.
+
+#Join sort_cutree with logcpm
+logcpm_200 <- as.data.frame(logcpm_200) %>% 
+  rownames_to_column(var="AGI")
+logcpm_200 <- full_join(sort_cutree, logcpm_200, by = "AGI")
+colnames(logcpm_200)[2] <- "cluster"
+
+write.csv(logcpm_200, file="Top200_sort_cutree.csv", row.names=FALSE) #save the cluster assignment
+
+#You can also cut the tree at a pre-defined tree height, and extract the gene-to-cluster assignments at that height:
+plot(out$tree_row, cex=0.6)
+abline(h=4, col="red", lty=2, lwd=2)
+#Cut the row (gene) dendrogram at a Euclidean distance dis-similarity of 4
+sort(cutree(out$tree_row, h=4))
+```
+
+#### Chunk 3: Perform pairwise comparisons
+```{r Perform DGE comparisons between treatments}
+###Comparison 1: h1.4_H_vs_h1.4_RT
+##Perform differential expression analysis
+qlf_h1.4_H_vs_h1.4_RT <- glmQLFTest(fit, contrast=comparisons[,"h1.4_H_vs_h1.4_RT"]) 
+
+#Show number of genes differentially expressed (up and down, FDR<0.05)
+summary(decideTestsDGE(qlf_h1.4_H_vs_h1.4_RT)) 
+#5257 genes up, 4929 genes down by heat, 7134 not significant. 17320 genes total.
+
+#Extract all differentially expressed genes at FDR < 0.05 differentially expressed genes (DEGs) - set n to number of genes in dataset so all are included
+top_DEG1 <- topTags(qlf_h1.4_H_vs_h1.4_RT, n=17320)
+top_DEG1 <- as.data.frame(top_DEG1)
+DEG_h1.4_H_vs_h1.4_RT <- subset(top_DEG1, FDR<0.01) %>% subset(abs(logFC)>1) 
+DEG_h1.4_H_vs_h1.4_RT <- rownames_to_column(DEG_h1.4_H_vs_h1.4_RT, var="AGI") #rownames are converted to a column.
+#UpByH <- subset(DEG_h1.4_H_vs_h1.4_RT, logFC>0 & FDR<0.05) #5257 genes up-regulated by Heat in hot1-4
+#DnByH <- subset(DEG_h1.4_H_vs_h1.4_RT, logFC<0 & FDR<0.05) #4929 genes down-regulated by Heat in hot1-4
+
+#Save top DEGs in a csv file
+write.csv(top_DEG1, file="Top_tags_h1.4_H_vs_h1.4_RT_stranded.csv", row.names=TRUE)
+
+##Plots
+#Histogram of FDR values
+hist(top_DEG1$FDR, main="h1.4_H_vs_h1.4_RT", xlab = "FDR")
+#Make MD plot of comparisons
+plotMD(qlf_h1.4_H_vs_h1.4_RT, main = "h1.4_H_vs_h1.4_RT") 
+
+
+###Comparison 2: sh2_H_vs_h1.4_H##########################
+##Perform differential expression analysis
+qlf_sh2_H_vs_h1.4_H <- glmQLFTest(fit, contrast=comparisons[,"sh2_H_vs_h1.4_H"]) 
+
+#Show number of genes differentially expressed (up and down)
+summary(decideTestsDGE(qlf_sh2_H_vs_h1.4_H)) 
+#2373 genes up, 2975 genes down and 11972 NotSig by shot2 mutation
+
+#Extract all differentially expressed genes at FDR < 0.05 differentially expressed genes (DEGs) - set n high so the limit is the p_value cutoff
+top_DEG2 <- topTags(qlf_sh2_H_vs_h1.4_H, n=17320)
+top_DEG2 <- as.data.frame(top_DEG2)
+DEG_sh2_H_vs_h1.4_H <- subset(top_DEG2, FDR<0.01) #%>% subset(abs(logFC)>1) 
+DEG_sh2_H_vs_h1.4_H <- rownames_to_column(DEG_sh2_H_vs_h1.4_H, var="AGI") #rownames are converted to a column.
+
+#Save top DEGs in a csv file
+write.csv(top_DEG2, file="Top_tags_sh2_H_vs_h1.4_H_stranded.csv", row.names=TRUE)
+
+##Plots
+#Histogram of FDR values
+#top_DEG2 <- as.data.frame(top_DEG2)
+hist(top_DEG2$FDR, main="sh2_H_vs_h1.4_H", xlab = "FDR")
+#Make MD plot of comparisons
+plotMD(qlf_sh2_H_vs_h1.4_H, main = "sh2_H_vs_h1.4_H") 
+
+
+###Comparison 3: h1.4_H_vs_sh2_RT
+##Perform differential expression analysis
+qlf_h1.4_H_vs_sh2_RT <- glmQLFTest(fit, contrast=comparisons[,"h1.4_H_vs_sh2_RT"]) #
+
+#Show number of genes differentially expressed (up and down)
+summary(decideTestsDGE(qlf_h1.4_H_vs_sh2_RT)) 
+
+#Extract all differentially expressed genes at FDR < 0.05 differentially expressed genes (DEGs) - set n high so the limit is the p_value cutoff
+top_DEG3 <- topTags(qlf_h1.4_H_vs_sh2_RT, n=17320)
+
+#Save top DEGs in a csv file
+write.csv(top_DEG3, file="Top_tags_h1.4_H_vs_sh2_RT_stranded.csv", row.names=TRUE)
+
+##Plots
+#Histogram of FDR values
+top_DEG3 <- as.data.frame(top_DEG3)
+hist(top_DEG3$FDR, main="h1.4_H_vs_sh2_RT", xlab = "FDR")
+#Make MD plot of comparisons
+plotMD(qlf_h1.4_H_vs_sh2_RT, main = "h1.4_H_vs_sh2_RT") 
+
+
+###Comparison 4: h1.4_RT_vs_sh2_H
+##Perform differential expression analysis
+qlf_h1.4_RT_vs_sh2_H <- glmQLFTest(fit, contrast=comparisons[,"h1.4_RT_vs_sh2_H"]) #
+
+#Show number of genes differentially expressed (up and down)
+summary(decideTestsDGE(qlf_h1.4_RT_vs_sh2_H)) 
+
+#Extract all differentially expressed genes at FDR < 0.05 differentially expressed genes (DEGs) - set n high so the limit is the p_value cutoff
+top_DEG4 <- topTags(qlf_h1.4_RT_vs_sh2_H, n=17320)
+
+#Save top DEGs in a csv file
+write.csv(top_DEG4, file="Top_tags_h1.4_RT_vs_sh2_H_stranded.csv", row.names=TRUE)
+
+##Plots
+#Histogram of FDR values
+top_DEG4 <- as.data.frame(top_DEG4)
+hist(top_DEG4$FDR, main="h1.4_RT_vs_sh2_H", xlab = "FDR")
+#Make MD plot of comparisons
+plotMD(qlf_h1.4_RT_vs_sh2_H, main = "h1.4_RT_vs_sh2_H") 
+
+
+###Comparison 5: sh2_RT_vs_h1.4_RT
+##Perform differential expression analysis
+qlf_sh2_RT_vs_h1.4_RT <- glmQLFTest(fit, contrast=comparisons[,"sh2_RT_vs_h1.4_RT"]) #
+
+#Show number of genes differentially expressed (up and down)
+summary(decideTestsDGE(qlf_sh2_RT_vs_h1.4_RT)) 
+
+#Extract all differentially expressed genes at FDR < 0.05 differentially expressed genes (DEGs) - set n high so the limit is the p_value cutoff
+top_DEG5 <- topTags(qlf_sh2_RT_vs_h1.4_RT, n=17320)
+
+#Save top DEGs in a csv file
+write.csv(top_DEG5, file="Top_tags_sh2_RT_vs_h1.4_RT_stranded.csv", row.names=TRUE)
+
+##Plots
+#Histogram of FDR values - need to include all samples above
+top_DEG5 <- as.data.frame(top_DEG5)
+hist(top_DEG5$FDR, main="sh2_RT_vs_h1.4_RT", xlab = "FDR")
+#Make MD plot of comparisons
+plotMD(qlf_sh2_RT_vs_h1.4_RT, main = "sh2_RT_vs_h1.4_RT") 
+
+
+###Comparison 6: sh2_H_vs_sh2_RT
+##Perform differential expression analysis
+qlf_sh2_H_vs_sh2_RT <- glmQLFTest(fit, contrast=comparisons[,"sh2_H_vs_sh2_RT"]) #
+
+#Show number of genes differentially expressed (up and down)
+summary(decideTestsDGE(qlf_sh2_H_vs_sh2_RT)) 
+
+#Extract all differentially expressed genes at FDR < 0.05 differentially expressed genes (DEGs) - set n high so the limit is the p_value cutoff
+top_DEG6 <- topTags(qlf_sh2_H_vs_sh2_RT, n=17320)
+top_DEG6 <- as.data.frame(top_DEG6)
+DEG_sh2_H_vs_sh2_RT <- subset(top_DEG6, FDR<0.01) #%>% subset(abs(logFC)>1) 
+DEG_sh2_H_vs_sh2_RT <- rownames_to_column(DEG_sh2_H_vs_sh2_RT, var="AGI") #rownames are converted to a column.
+
+#Save top DEGs in a csv file
+write.csv(top_DEG6, file="Top_tags_sh2_H_vs_sh2_RT_stranded.csv", row.names=TRUE)
+
+##Plots
+#Histogram of FDR values
+#top_DEG6 <- as.data.frame(top_DEG6)
+hist(top_DEG6$FDR, main="sh2_H_vs_sh2_RT", xlab = "FDR")
+#Make MD plot of comparisons
+plotMD(qlf_sh2_H_vs_sh2_RT, main = "sh2_H_vs_sh2_RT") 
+
+###Heat map: Combine list of genes differentially regulated in hot1-4 (DEG_h1.4_H_vs_h1.4_RT), shot2 (DEG_sh2_H_vs_sh2_RT) by heat and shot2 vs hot1-4 under heat treatment (DEG_sh2_H_vs_h1.4_H).
+
+#Read in Gene name and description from Thalemine araport. Gene name in column 3, gene description is in column 10.
+DEG_hH_GeneList <- read.csv("DEG_hH_GeneList.csv", header = FALSE, fill = TRUE) %>% 
+  rename(AGI="V1", Gene="V3", Description="V10") %>% 
+  select(AGI, Gene, Description)
+
+#Join sort_cutree with Top200_araport to add gene name and description to AGI
+sort_cutree <- left_join(sort_cutree, Top200_araport, by="AGI")
+
+DEG_hH_sH_shH <- left_join(DEG_h1.4_H_vs_h1.4_RT, DEG_sh2_H_vs_sh2_RT, by="AGI") %>%
+  left_join(DEG_sh2_H_vs_h1.4_H, by="AGI") %>% 
+  select(AGI, logFC.x, logFC.y, logFC) %>% 
+  replace(is.na(.),0) %>% #replace NA to zero
+  arrange(-logFC.x, -logFC.y, -logFC) %>% 
+  rename(logFC_h1.4_H = logFC.x, logFC_sh2_H = logFC.y, logFC_sh2_h1.4_H = logFC) %>%
+  #left_join(DEG_hH_GeneList, by="AGI") %>% #add gene names and descriptions
+  column_to_rownames("AGI")
+
+#what happens to differential genes in hot1-4 by heat when shot2 is mutated?
+DEG_hH_shH <- left_join(DEG_h1.4_H_vs_h1.4_RT, DEG_sh2_H_vs_h1.4_H, by="AGI") %>%
+  select(AGI, logFC.x, logFC.y) %>% 
+  replace(is.na(.),0) %>% #replace NA to zero
+  arrange(desc(logFC.x),logFC.y) %>% 
+  rename(logFC_h1.4_H = logFC.x, logFC_sh2_h1.4_H = logFC.y) %>% 
+  column_to_rownames("AGI")
+
+#save DEGs differentially regulated by heat in hot1-4 and hot1-4 shot2.
+write.csv(DEG_hH_sH_shH, file="DEG_hH_sH_shH.csv", row.names=TRUE)
+write.csv(DEG_hH_shH, file="DEG_hH_shH.csv", row.names=TRUE)
+
+symmetric_breaks2 <- seq(-max(abs(DEG_hH_sH_shH)), max(abs(DEG_hH_sH_shH)), length.out = 101)
+symmetric_breaks3 <- seq(-10, 10, length.out = 101)
+
+pheatmap(DEG_hH_sH_shH, cluster_rows=FALSE, cluster_cols=FALSE, color = colorRampPalette(c("darkblue", "blue", "white", "red", "darkred"))(100), breaks = symmetric_breaks3, treeheight_row=0, treeheight_col = 0, show_rownames = F) #cluster_rows=FALSE, cluster_cols=FALSE if you want no clustering
+
+pheatmap(DEG_hH_shH, cluster_rows=FALSE, cluster_cols=FALSE, color = colorRampPalette(c("blue", "white", "red"))(100), 
+         breaks = symmetric_breaks, treeheight_row=0, treeheight_col = 0, show_rownames = F)
+```
+
+#### Chunk 4: Change gene boundaries to detect readthrough
+```{r Set gene boundaries that define "readthrough"}
+#Assumes the count data from the first chunk have been read into R and lowly expressed genes filtered out
+
+#----------------Set parameter values and read in data-----------------
+#Set distance for upstream genic region and downstream readthrough region. Default  = 100bp
+s <- 100
+
+#Read in gene boundaries bed file for expressed genes (default) or all genes
+genes <- read.table("gene_boundaries.bed", sep="\t", quote = "", fill = FALSE) #quote is used to ignore both single and double quotes within the data.
+head(genes)
+
+colnames(genes) <- c("chromosome", "start", "end","gene_name", "V5","strand", "database", "feature", "V9", "notes") #Rename columns
+genes$gene_name <- as.character(genes$gene_name) #Convert columns to character
+
+#Subset all genes for expressed genes
+expressed_genes <- rownames_to_column(as.data.frame(y$counts), var="gene_name")  %>% #subset for genes that pass edgeR's filters
+  as_tibble() %>% #convert to tibble  
+  inner_join(genes, by = "gene_name") %>% #join gene boundaries bed file and table of expressed genes, keeping only expressed genes
+  select(chromosome, start, end, gene_name, V5, strand, database, feature, V9, notes) %>% #select relevant columns
+  filter(chromosome != "ChrC" & chromosome != "ChrM") #Remove chloroplast and mitochondrial sequences
+
+head(expressed_genes)
+
+nrow(genes) #How many genes are present in the full bed file that inlcudes all genes?
+nrow(expressed_genes) #How many genes are included in the bed file that's been filtered for expressed genes?
+#genes$gene_name[!genes$gene_name %in% expressed_genes$gene_name] #Which genes are in the annotation file and NOT expressed?
+
+#Write file including full gene boundaries to use for intersecting with bedtools
+#(expressed_genes, file = "expressed_gene_boundaries_stranded.bed", sep="\t", col.names = FALSE, row.names = FALSE, quote = FALSE)
+
+# --------Create boundaries for readthrough detection--------
+
+#Make bed file for genic region.
+##Normalize by taking the region s base pairs upstream of the transcription stop site for each gene. 
+#If the strand is negative, then set the end to the start (b/c it goes the other way) and set start to s base pairs upstream
+expressed_genes_upstream_region <- expressed_genes %>% 
+  mutate(start2 = ifelse(strand == "-", start, end - (s-1))) %>% 
+  mutate(end2 = ifelse(strand == "-", start + (s-1), end)) %>% 
+  select(chromosome, start2, end2, gene_name, V5, strand, database, feature, V9, notes)
+head(expressed_genes_upstream_region)
+
+write.table(expressed_genes_upstream_region, file = "expressed_genes_upstream_region.bed", sep="\t", col.names = FALSE, row.names = FALSE, quote = FALSE)
+
+#Make bed file for "readthrough" i.e. downstream region
+#Use window of 100bp, and similarly switch start and stop for genes on the negative strand (b/c they go the other way)
+expressed_genes_downstream_region <- expressed_genes %>% 
+  mutate(start2 = ifelse(strand == "-", start - s, end + 1)) %>% 
+  mutate(end2 = ifelse(strand == "-", start - 1, end + s)) %>% 
+  select(chromosome, start2, end2, gene_name, V5, strand, database, feature, V9, notes)
+head(expressed_genes_downstream_region)  
+  
+write.table(expressed_genes_downstream_region, file = "expressed_genes_downstream_region.bed", sep="\t", col.names = FALSE, row.names = FALSE, quote = FALSE)
+```
+
+
+*Run script 03_intersect all before proceeding*
+
+
+#### Chunk 5: Prepare files for analysis
+```{r Prep files}
+library(edgeR)
+library(tidyverse)
+library(statmod)
+library(RColorBrewer)
+library(pheatmap)
+library(ggpubr)
+
+#rm(list=ls()) #Clear working environment
+
+# ----------Read in files-------------------
+#Set working directory to location of the reference bed file expressed_genes_upstream_region.bed AND intersect.bed files just generated. Paste the path between the quotes in the setwd command and the path="" argument in the two list.files command below.
+
+#setwd("")
+#Save names of count files for upstream genic region for each sample
+files1 <- list.files(path = "[PATH]", pattern = "*all_expressed_genes_upstream_genic_region.intersect.bed", full.names = F)
+
+#Save names of count files for downstream readthrough region for each sample
+files2 <- list.files(path = "[PATH]", pattern = "*all_expressed_genes_downstream_readthrough_region.intersect.bed", full.names = F)
+
+#Gene boundaries for join
+f_boundaries <- read_tsv("expressed_genes_upstream_region.bed", col_names=FALSE)
+colnames(f_boundaries)[c(1:4, 6)] <- c("chr", "start", "stop", "gene", "strand")
+
+#select only columns of interest
+f_boundaries <- f_boundaries %>% select(chr, start, stop, gene, strand)
+
+##Import as a list count matrices for upstream genic region for each sample
+f_genes <- sapply(files1, read_tsv, simplify=FALSE, col_names = FALSE)
+
+##Import as a list count matrices for downstream readthrough region for each sample
+f_readthrough <- sapply(files2, read_tsv, simplify=FALSE, col_names = FALSE)
+
+#samples <- names(f_genes) #Save names of files
+sample_names <- c("h1_4_H1", "h1_4_H2", "h1_4_H3", "h1_4_RT1", "h1_4_RT2", "h1_4_RT3", "sh2_H1", "sh2_H2", "sh2_H3", "sh2_RT1", "sh2_RT2", "sh2_RT3")
+
+#Rename columns for each dataframe - gene column = gene name, count column = sample name
+for(i in 1:length(f_genes)){
+  colnames(f_genes[[i]])[4] = colnames(f_readthrough[[i]])[4] <- "gene"
+  colnames(f_genes[[i]])[11] = colnames(f_readthrough[[i]])[11] <- sample_names[i]
+}
+
+#select only columns with gene names and counts
+for(j in 1:length(f_genes)){
+  f_genes[[j]] <- f_genes[[j]] %>% 
+    select(4, 11)
+f_readthrough[[j]] <- f_readthrough[[j]] %>% 
+  select(4, 11)
+  }
+
+#---------Combine counts matrices from all samples into one---------------
+#Combine all dataframes from list to make matrix of counts
+##Upstream genic region
+gene_counts <- plyr::join_all(f_genes, by = "gene", type = "full") %>% 
+  as_tibble()
+
+#Downstream readthrough region
+readthrough_counts <- plyr::join_all(f_readthrough, by = "gene", type = "full") %>% 
+  as_tibble()
+
+nrow(gene_counts)
+nrow(readthrough_counts) #should be the same
+
+nrow(gene_counts[gene_counts$h1_4_H3 > 20,]) #How many genes have >20 counts (can change number)
+nrow(readthrough_counts[readthrough_counts$h1_4_H3 > 20,]) #How many readthrough regions have >20 counts: should be less than above
+
+#Add 1 read to every gene that has 0 so we can calculate ratios and not get NA
+gene_counts[gene_counts == 0] <- 1
+
+#------------Calculate all ratios then split into treatment---------------
+#For each gene, get the ratio of reads mapping to the "readthrough" region vs reads mapping to the gene
+ratios <- cbind(gene = gene_counts$gene, round(readthrough_counts[,2:13] / gene_counts[,2:13], 2))
+
+#Change infinite and NaN values to NA
+#ratios[mapply(is.infinite, ratios)] <- NA
+#ratios[mapply(is.nan, ratios)] <- NA
+
+#Add mean ratio for each gene to a new column
+ratios$means <- rowMeans(ratios[,2:13], na.rm = TRUE)
+
+#How many genes have more readthrough than normal gene expression
+nrow(ratios[ratios$means > 1,])
+nrow(ratios[ratios$means < 1,])
+
+#Split up by treatment
+h1_4_H <- ratios[,1:4]
+h1_4_RT <- ratios[,c(1,5:7)]
+sh2_H <- ratios[,c(1,8:10)]
+sh2_RT <- ratios[,c(1, 11:13)]
+
+#Take means for each row (gene)
+h1_4_H$means <- rowMeans(h1_4_H[,2:4], na.rm = TRUE)
+h1_4_RT$means <- rowMeans(h1_4_RT[,2:4], na.rm = TRUE)
+sh2_H$means <- rowMeans(sh2_H[,2:4], na.rm = TRUE)
+sh2_RT$means <- rowMeans(sh2_RT[,2:4], na.rm = TRUE)
+
+#--------------Create filtered dataset----------------
+#Filter 1: Must have 5 intersecting counts (can change)
+filt <- 5
+
+#Make second dataframe of filtered counts for genic regions
+gene_counts_filt <- gene_counts
+gene_counts_filt[gene_counts_filt < filt] <- 1 #set all instances where counts in the genic region are fewer than five to 1, so ratio will end up being 0
+
+#Make second dataframe of filtered counts for readthrough regions
+readthrough_counts_filt <- readthrough_counts
+readthrough_counts_filt[readthrough_counts_filt < filt] <- 0 #set all instances where counts in the readthrough region are fewer than five to 0, so ratio will end up being 0
+
+#Make dataframe of filtered ratios of genic:readthrough regions
+ratios_filt <- cbind(gene = gene_counts_filt$gene, round(readthrough_counts_filt[,2:13] / gene_counts_filt[,2:13], 2))
+
+#Take mean counts of genic region intersect to make it easier to query by treatment
+mean_counts <- gene_counts_filt %>% rowwise() %>% 
+  mutate(h1_4_H_up = mean(c(h1_4_H1, h1_4_H2, h1_4_H3))) %>% 
+  mutate(h1_4_RT_up = mean(c(h1_4_RT1, h1_4_RT2, h1_4_RT3))) %>% 
+  mutate(sh2_H_up = mean(c(sh2_H1, sh2_H2, sh2_H3))) %>% 
+  mutate(sh2_RT_up = mean(c(sh2_RT1, sh2_RT2, sh2_RT3))) %>% 
+  select(gene, h1_4_H_up, h1_4_RT_up, sh2_H_up, sh2_RT_up) %>% 
+  as_tibble()
+
+#Filter genes with mean_sum >= 10
+mean_counts_filt <- mean_counts %>% rowwise() %>% 
+  mutate(up_sum = sum(c(h1_4_H_up, h1_4_RT_up, sh2_H_up, sh2_RT_up))) %>% 
+  filter(up_sum >= 10)
+
+#Take mean counts of downstream ("readthrough") region intersect to make it easier to query by treatment
+mean_readthrough <- readthrough_counts_filt %>% rowwise() %>% 
+  mutate(h1_4_H_down = mean(c(h1_4_H1, h1_4_H2, h1_4_H3))) %>% 
+  mutate(h1_4_RT_down = mean(c(h1_4_RT1, h1_4_RT2, h1_4_RT3))) %>% 
+  mutate(sh2_H_down = mean(c(sh2_H1, sh2_H2, sh2_H3))) %>% 
+  mutate(sh2_RT_down = mean(c(sh2_RT1, sh2_RT2, sh2_RT3))) %>% 
+  select(gene, h1_4_H_down, h1_4_RT_down, sh2_H_down, sh2_RT_down) %>% 
+  as_tibble()
+
+#Take mean ratios of downstream "readthrough" region to upstream genic region to make it easier to query by treatment
+mean_ratios <- ratios_filt %>% rowwise() %>% 
+  mutate(h1_4_H_ratio = mean(c(h1_4_H1, h1_4_H2, h1_4_H3))) %>% 
+  mutate(h1_4_RT_ratio = mean(c(h1_4_RT1, h1_4_RT2, h1_4_RT3))) %>% 
+  mutate(sh2_H_ratio = mean(c(sh2_H1, sh2_H2, sh2_H3))) %>% 
+  mutate(sh2_RT_ratio = mean(c(sh2_RT1, sh2_RT2, sh2_RT3))) %>% 
+  select(gene, h1_4_H_ratio, h1_4_RT_ratio, sh2_H_ratio, sh2_RT_ratio) %>% 
+  as_tibble()
+
+#Spot-check any gene of interest
+mean_counts[mean_counts$gene == "AT1G53540",]
+mean_readthrough[mean_readthrough$gene == "AT1G53540",]
+mean_ratios[mean_ratios$gene == "AT1G53540",]
+
+#Genes with higher mean_ratios in shot1-2_heat samples than hot1-4_heat samples.
+mean_ratios[mean_ratios$h1_4_H_ratio < mean_ratios$sh2_H_ratio,]
+
+#Split up ratios by treatment after filtering for low read counts 
+h1_4_H_filt <- ratios_filt[,1:4]
+h1_4_RT_filt <- ratios_filt[,c(1,5:7)]
+sh2_H_filt <- ratios_filt[,c(1,8:10)]
+sh2_RT_filt <- ratios_filt[,c(1, 11:13)]
+```
+
+#### Chunk 6: Plot histograms of the data
+```{r Plot the data}
+#-----------Plot all ratios for individual samples AFTER filtering for low counts-------------
+#Make new columns for treatments so they can be plotted separately
+#Focus on heated treatments
+h1_4_H_filt2 <- h1_4_H_filt %>% 
+  mutate(sample1 = ifelse(h1_4_H1 >= 1, 1, h1_4_H1),
+         sample2 = ifelse(h1_4_H2 >= 1, 1, h1_4_H2),
+         sample3 = ifelse(h1_4_H3 >= 1, 1, h1_4_H3)) %>% 
+  select(gene, sample1, sample2, sample3)
+
+sh2_H_filt2 <- sh2_H_filt %>% 
+  mutate(sample1 = ifelse(sh2_H1 >= 1, 1, sh2_H1),
+         sample2 = ifelse(sh2_H2 >= 1, 1, sh2_H2),
+         sample3 = ifelse(sh2_H3 >= 1, 1, sh2_H3)) %>% 
+  select(gene, sample1, sample2, sample3)
+
+h1_4_H_plot_1_filt <- ggplot(data = h1_4_H_filt2, aes(x = sample1)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "h1-4 Heated Sample 1", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+h1_4_H_plot_2_filt <- ggplot(data = h1_4_H_filt2, aes(x = sample2)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "h1-4 Heated Sample 2", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+h1_4_H_plot_3_filt <- ggplot(data = h1_4_H_filt2, aes(x = sample3)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "h1-4 Heated Sample 3", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+sh2_H_plot_1_filt <- ggplot(data = sh2_H_filt2, aes(x = sample1)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "sh2 Heated Sample 1", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+sh2_H_plot_2_filt <- ggplot(data = sh2_H_filt2, aes(x = sample2)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "sh2 Heated Sample 2", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+sh2_H_plot_3_filt <- ggplot(data = sh2_H_filt2, aes(x = sample3)) + 
+  geom_histogram(binwidth=.01) + 
+  labs(title = "sh2 Heated Sample 3", x = "Readthrough to Gene Read Count Ratio") +
+  xlim(0.01, 0.99)
+
+plotlist_H_filt <- list(h1_4_H_plot_1_filt, h1_4_H_plot_2_filt, h1_4_H_plot_3_filt, sh2_H_plot_1_filt, sh2_H_plot_2_filt, sh2_H_plot_3_filt)
+
+#Plot list
+p_heated_filt <- ggarrange(plotlist = plotlist_H_filt)
+p_heated_filt
+annotate_figure(p_heated_filt,
+                top = text_grob("Filtered for counts > 5", size = 20))
+```
+
+
+#### Chunk 7: Identify putative genes showing transcriptional readthrough
+```{r ID genes with transcriptional readthrough}
+#-------Create lists of differentially expressed genes to compare to readthrough---------
+#This is a reiteration of some of the code from above, but only includes the part relevant for comparing to readthrough.
+#Set working directory to location of counts data matrix
+#setwd("")
+
+library(edgeR)
+library(tidyverse)
+library(statmod)
+library(RColorBrewer)
+library(pheatmap)
+library(ggpubr)
+
+###----------------Same as in chunk 2 from here-------------------------------###
+#-------------READ IN DATA------------------------
+counts <- data.frame(read.table(file="all_HTseq.txt", header = TRUE, row.names = 1)) #Import count data to R
+
+head(counts) #Make sure that samples are ordered the same as the vector in the line below (i.e. make sure the samples will be names appropriately)
+
+#if necessary, rename column names to sample names
+#colnames(counts) <- c("hRT1", "hRT2", ..., "s2H3")
+
+#--------------DGE analysis by treatment---------------
+#Group replicate samples
+group <- factor(c(rep(c("h1.4_RT", "sh2_RT", "h1.4_H", "sh2_H"), each = 3)), levels = c("h1.4_RT", "sh2_RT", "h1.4_H", "sh2_H"), ordered = TRUE) 
+
+y <- DGEList(counts = counts, group = group) #Create DGEList object with groups
+
+#Filter out lowly expressed genes that will mess up comparisons
+keep <- filterByExpr(y)
+table(keep) #How many genes are filtered?
+y <- y[keep,,keep.lib.sizes=FALSE]
+
+#Set parameters and fit model
+y <- calcNormFactors(y) #Normalize library sizes to account for some samples having genes that absorb a disproportionate amount of read depth
+design <- model.matrix(~0+group) #Create design matrix (0+ replaces the intercept with a group)
+y <- estimateDisp(y, design, robust=TRUE) #Estimate dispersion for negative binomial model
+
+fit <- glmQLFit(y, design, robust=TRUE) #Fit the negative binomial model
+
+#Make design matrix for all pairwise comparisons
+comparisons <- makeContrasts(h1.4_H_vs_h1.4_RT = grouph1.4_H - grouph1.4_RT,
+                             sh2_H_vs_h1.4_H = groupsh2_H - grouph1.4_H,
+                             h1.4_H_vs_sh2_RT = grouph1.4_H - groupsh2_RT,
+                             h1.4_RT_vs_sh2_H = grouph1.4_RT - groupsh2_H,
+                             sh2_RT_vs_h1.4_RT = groupsh2_RT - grouph1.4_RT,
+                             sh2_H_vs_sh2_RT = groupsh2_H - groupsh2_RT,
+                             levels=design)
+
+###----------------Same as in chunk 2 upto here-------------------------------###
+
+counts_per_mil <- cpm(y, log=FALSE) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "gene") %>%
+  select(gene, hRT1_cpm=`hRT1`, hRT2_cpm=`hRT2`, hRT3_cpm=`hRT3`,s2RT1_cpm=`s2RT1`, s2RT2_cpm=`s2RT2`, s2RT3_cpm=`s2RT3`, hH1_cpm=`hH1`, hH2_cpm=`hH2`, hH3_cpm=`hH3`, s2H1_cpm=`s2H1`, s2H2_cpm=`s2H2`, s2H3_cpm=`s2H3`) %>% 
+  mutate_at(2:13, ~ round(., 0))
+
+#Calculate mean counts per million per treatment
+# mean_cpm <- cpm(y, log=FALSE) %>% 
+#   as.data.frame() %>% 
+#   rownames_to_column(var = "gene") %>% 
+#   rowwise() %>% 
+#   mutate(h1_4_H_mean_cpm = mean(c(`h1-4-H1_S10`, `h1-4-H2_S12`, `h1-4-H3_S3`))) %>% 
+#   mutate(h1_4_RT_mean_cpm = mean(c(`h1-4-RT1_S1`, `h1-4-RT2_S6`, `h1-4-RT3_S8`))) %>% 
+#   mutate(sh2_H_mean_cpm = mean(c(`sh2-H1_S11`, `sh2-H2_S2`, `sh2-H3_S4`))) %>% 
+#   mutate(sh2_RT_mean_cpm = mean(c(`sh2-RT1_S5`, `sh2-RT2_S7`, `sh2-RT3_S9`))) %>% 
+#   select(gene, h1_4_H_mean_cpm, h1_4_RT_mean_cpm, sh2_H_mean_cpm, sh2_RT_mean_cpm)
+
+##Temp comparison 1: h1.4_H_vs_h1.4_RT
+#Perform differential expression analysis
+qlf_h1.4_H_vs_h1.4_RT <- glmQLFTest(fit, contrast=comparisons[,"h1.4_H_vs_h1.4_RT"]) 
+
+#Show number of genes differentially expressed (up and down, FDR < 0.05)
+summary(decideTestsDGE(qlf_h1.4_H_vs_h1.4_RT)) 
+
+#Extract all differentially expressed genes at FDR < 0.05 differentially expressed genes (DEGs) - set n to number of genes in dataset so all are included
+h1_4_HS <- topTags(qlf_h1.4_H_vs_h1.4_RT, n=17320) #h1_4_HS is the same as top_DEG1 in chunk 3
+#Convert to dataframe and filter for DE in heated, 
+h1_4_HS <- h1_4_HS %>% as.data.frame() %>% 
+  rownames_to_column(var = "gene") %>% 
+  mutate(DE_in_h1_4_HS = ifelse(FDR < 0.05 & abs(logFC) > 1, "yes", "no")) %>%
+  select(gene, DE_in_h1_4_HS, logFC_h1_4_HS = logFC, FDR_h1_4_HS = FDR)
+
+###Temp comparison 2: sh2_H_vs_sh2_RT
+qlf_sh2_H_vs_sh2_RT <- glmQLFTest(fit, contrast=comparisons[,"sh2_H_vs_sh2_RT"]) #
+
+#Show number of genes differentially expressed (up and down)
+summary(decideTestsDGE(qlf_sh2_H_vs_sh2_RT)) 
+
+#Set n high so the limit is the p_value cutoff
+sh2_HS <- topTags(qlf_sh2_H_vs_sh2_RT, n=17320) #sh2_HS is the same as top_DEG6 in chunk 3
+#Convert to dataframe and filter for DE in heated, 
+sh2_HS <- sh2_HS %>% as.data.frame() %>% 
+  rownames_to_column(var = "gene") %>% 
+  mutate(DE_in_sh2_HS = ifelse(FDR < 0.05 & abs(logFC) > 1, "yes", "no")) %>%
+  select(gene, DE_in_sh2_HS, logFC_sh2_HS = logFC, FDR_sh2_HS = FDR)
+
+###Mutant comparison in heated: sh2_H_vs_h1.4_H
+qlf_sh2_H_vs_h1.4_H <- glmQLFTest(fit, contrast=comparisons[,"sh2_H_vs_h1.4_H"]) 
+
+#Show number of genes differentially expressed (up and down)
+summary(decideTestsDGE(qlf_sh2_H_vs_h1.4_H)) 
+
+#Set n high so the limit is the p_value cutoff
+sh2_v_h1_4_HS <- topTags(qlf_sh2_H_vs_h1.4_H, n=17320) #sh2_v_h1_4_HS is the same as top_DEG2 in chunk 3
+
+#Convert to dataframe and filter for DE in heated, 
+sh2_v_h1_4_HS <- sh2_v_h1_4_HS %>% as.data.frame() %>% 
+  rownames_to_column(var = "gene") %>% 
+  mutate(DE_in_sh2_HS_v_h1_4_HS = ifelse(FDR < 0.05 & abs(logFC) > 1, "yes", "no")) %>%
+  select(gene, DE_in_sh2_HS_v_h1_4_HS, logFC_sh2_HS_v_h1_4_HS = logFC, FDR_sh2_HS_v_h1_4_HS = FDR)
+
+#------------Identify putative "readthrough genes"--------------
+#Filter 2:  filter counts by differentially expressed genes in heated treatments
+#Filter 3: filter by readthrough:genic region ratios
+##Set ratio filters
+
+###var1 is minimum ratio required to identify the gene as one likely showing readthrough
+var1 <- 0.25
+
+###var2 is the maximum ratio allowed for a gene to NOT be considered a likely readthrough gene.
+var2 <- 0.1
+
+#NOTE: 0.1 is a good number to serve as a max for genes unlikely to show readthrough. In the code below, h1_4_RT_mean and sh2_RT_mean must be <0.1. We do this so we don't capture genes with readthrough that is uncorrelated with one of our treatments, or adjacent genes that may register as readthrough in all treatments. The lower bound used for ratios to identify genes showing readthrough in treatments (temperature and sh2 mutant) is set to 0.25. This can be increased for stringency (at the risk of excluding biologically relevant information) or decreased to make it more lax (at the risk of including genes that do not show transcriptional readthrough.
+
+#Or maybe it is more appropriate to calculate the differences of the ratios (e.g. between sh2_HS_ratio and h1_4_HS_ratio). The higher the difference, the more likely to be readthrough candidates.
+
+#----------------Filtered by DE in heated---------------
+#Create dataframe of all ratios, logFC values, whether DE or not, and cpm
+all_ratios <- mean_ratios %>% left_join(h1_4_HS, by = "gene") %>%
+  left_join(sh2_HS, by = "gene") %>% 
+  left_join(sh2_v_h1_4_HS, by = "gene") %>% 
+  left_join(counts_per_mil, by = "gene") %>% 
+  as.data.frame()
+
+write.csv(all_ratios, file="all_readthrough_ratios_and_DE_scores.csv", row.names=FALSE)
+
+#Create dataframe of mean gene counts (filtered >= 10), mean readthrough, logFC, whether DE or not, and cpm
+all_counts_ratios <-  mean_counts %>% rowwise() %>% 
+  mutate(up_sum = sum(c(h1_4_H_up, h1_4_RT_up, sh2_H_up, sh2_RT_up))) %>% 
+  left_join(mean_readthrough, by = "gene") %>%
+  left_join(mean_ratios, by = "gene") %>% 
+  left_join(h1_4_HS, by = "gene") %>%
+  left_join(sh2_HS, by = "gene") %>% 
+  left_join(sh2_v_h1_4_HS, by = "gene") %>% 
+  left_join(counts_per_mil, by = "gene") %>% 
+  as.data.frame()
+
+write.csv(all_counts_ratios, file="all_mean_counts_ratios_and_DE_scores.csv", row.names=FALSE)
+
+##Compare readthrough genes to DEGs in sh2 and h1-4 heat stress treatments. Which genes show readthrough in sh2 heat stress and NOT h1-4 heat stress (ignore room temp)
+sh2_HS_v_h1_4_HS_readthrough_candidates_and_DE_scores <- all_ratios %>% 
+  #filter(DE_in_sh2_HS_v_h1_4_HS == "yes") %>% #Uncomment if want to filter out non-DE genes
+  mutate(readthrough_candidate=ifelse(sh2_H_ratio > var1 & h1_4_H_ratio < var2, "yes", "no")) %>% 
+  inner_join(f_boundaries, by = "gene") %>% #add chromosome position
+  select(gene, start, stop, strand, h1_4_H_ratio, sh2_H_ratio, logFC_sh2_HS_v_h1_4_HS, FDR_sh2_HS_v_h1_4_HS, DE_in_sh2_HS_v_h1_4_HS, readthrough_candidate) %>% #select relevant columns
+  mutate_at(5:7, ~ round(., 2)) %>% 
+  arrange(desc(logFC_sh2_HS_v_h1_4_HS)) %>% #sort by descending logFC value
+  as.data.frame() #convert to dataframe for visualizing in console
+    
+sh2_HS_v_h1_4_HS_readthrough_candidates_and_DE_scores_2 <- all_counts_ratios %>% 
+  filter(h1_4_H_up >= 10) %>% #keep genes with 100bp upstream counts of 10 or more in hot1-4_heated samples.
+  #mutate(readthrough_candidate=ifelse(sh2_H_ratio > var1 & h1_4_H_ratio < var2, "yes", "no")) %>% 
+  mutate(ratio_diff=sh2_H_ratio-h1_4_H_ratio) %>% 
+  inner_join(f_boundaries, by = "gene") %>% #add chromosome position
+  select(gene, start, stop, strand, h1_4_H_up, sh2_H_up, h1_4_H_down, sh2_H_down, h1_4_H_ratio, sh2_H_ratio, ratio_diff, logFC_h1_4_HS, logFC_sh2_HS_v_h1_4_HS, FDR_h1_4_HS, FDR_sh2_HS_v_h1_4_HS, DE_in_h1_4_HS, DE_in_sh2_HS_v_h1_4_HS) %>% #select relevant columns
+  mutate_at(5:13, ~ round(., 2)) %>% 
+  arrange(desc(ratio_diff)) %>% #sort by descending ratio difference value
+  as.data.frame() #convert to dataframe for visualizing in console
+    
+write.csv(sh2_HS_v_h1_4_HS_readthrough_candidates_and_DE_scores_2, file="sh2_HS_v_h1_4_HS_readthrough_candidates_and_DE_scores_2.csv", row.names=FALSE) #For use in publication
+
+##Compare readthrough genes to DEGs in sh2 treatment. Which genes show readthrough in sh2 heated and NOT sh2 RT (ignore h1-4)
+sh2_readthrough_candidates_and_DE_scores <- all_ratios %>% 
+  #filter(DE_in_sh2_HS == "yes") %>% #Uncomment if want to filter out non-DE genes
+  mutate(readthrough_candidate=ifelse(sh2_H_ratio > var1 & sh2_RT_ratio < var2, "yes", "no")) %>% 
+  inner_join(f_boundaries, by = "gene") %>% #add chromosome position
+  select(gene, chr, stop, strand, sh2_H_ratio, sh2_RT_ratio, logFC_sh2_HS, FDR_sh2_HS,DE_in_sh2_HS, readthrough_candidate) %>% #select relevant columns
+  mutate_at(5:7, ~ round(., 2)) %>% 
+  arrange(desc(logFC_sh2_HS)) %>% #sort by descending logFC value
+  as.data.frame() #convert to dataframe for visualizing in console
+    
+write.csv(sh2_readthrough_candidates_and_DE_scores, file="sh2_readthrough_candidates_and_DE_scores.csv", row.names=FALSE)
+  
+##Compare readthrough genes to DEGs in h1-4. Which genes show readthrough in h1-4 heated and NOT h1-4 RT (ignore sh2)
+h1_4_readthrough_candidates_and_DE_scores <- all_ratios %>% 
+  #filter(DE_in_h1_4_HS == "yes") %>%#Uncomment if want to filter out non-DE genes
+  mutate(readthrough_candidate=ifelse(h1_4_H_ratio > var1 & h1_4_RT_ratio < var2, "yes", "no")) %>% 
+  inner_join(f_boundaries, by = "gene") %>% #add chromosome position
+  select(gene, chr, stop, strand, h1_4_H_ratio, h1_4_RT_ratio, logFC_h1_4_HS, FDR_h1_4_HS, DE_in_h1_4_HS, readthrough_candidate) %>% #select relevant columns
+  mutate_at(5:7, ~ round(., 2)) %>% 
+  arrange(desc(logFC_h1_4_HS)) %>% #sort by descending logFC value
+  as.data.frame() #convert to dataframe for visualizing in console
+
+##Alternatively
+h1_4_readthrough_candidates_and_DE_scores_2 <- all_counts_ratios %>% 
+  filter(h1_4_H_up >= 10) %>% #keep genes with 100bp upstream counts of 10 or more in hot1-4_heated samples.
+  #mutate(readthrough_candidate=ifelse(sh2_H_ratio > var1 & h1_4_H_ratio < var2, "yes", "no")) %>% 
+  mutate(ratio_diff_h1_4=h1_4_H_ratio-h1_4_RT_ratio) %>% 
+  inner_join(f_boundaries, by = "gene") %>% #add chromosome position
+  select(gene, start, stop, strand, h1_4_RT_up, h1_4_H_up, h1_4_RT_down, h1_4_H_down, h1_4_RT_ratio, h1_4_H_ratio, ratio_diff_h1_4, logFC_h1_4_HS, FDR_h1_4_HS, DE_in_h1_4_HS) %>% #select relevant columns
+  mutate_at(5:12, ~ round(., 2)) %>% 
+  arrange(desc(ratio_diff_h1_4)) %>% #sort by descending ratio difference value
+  as.data.frame() #convert to dataframe for visualizing in console
+
+write.csv(h1_4_readthrough_candidates_and_DE_scores_2, file="h1_4_readthrough_candidates_and_DE_scores_2.csv", row.names=FALSE)
+
+# ------- Groundtruth --------
+#Look for row with a specific gene in dataframes of raw counts and ratios after intersect
+gene_counts[gene_counts$gene == "AT1G11265",]
+readthrough_counts[readthrough_counts$gene == "AT1G11265",]
+ratios[ratios$gene == "AT5G12030",]
+f_boundaries[f_boundaries$gene == "AT1G16030",]  
+```
+
+Extra analyses
+```{r Extra analyses}
+#-------------Extra analysis 1: Look for changes in gene expression upstream of 5' end (opposite of readthrough)------------------
+#Assumes the count data from chunk 1 have been read into R and lowly expressed genes filtered out
+#----------------Read in Data and set parameters  -----------------
+#Read in gene boundaries bed file for expressed genes (default) or all genes
+genes2 <- read.table("gene_boundaries.bed") 
+
+head(genes2)
+colnames(genes2) <- c("chromosome", "start", "end","gene_name", "V5","strand", "database", "feature", "V9", "notes") #Rename columns
+genes2$gene_name <- as.character(genes$gene_name) #Convert columns to character
+
+#Set distance for readthrough/normalization. Default  = 100bp
+s2 <- 100
+
+#Subset all genes for expressed genes
+expressed_genes2 <- rownames_to_column(as.data.frame(y$counts), var="gene_name")  %>% #subset for genes that pass edgeR's filters
+  as_tibble() %>% #convert to tibble  
+  inner_join(genes2, by = "gene_name") %>% #join gene boundaries bed file and table of expressed genes, keeping only expressed genes
+  select(chromosome, start, end, gene_name, V5, strand, database, feature, V9, notes) %>% #select relevant columns
+  filter(chromosome != "ChrC" & chromosome != "ChrM") #Remove chloroplast and mitochondrial sequences
+
+head(expressed_genes2)
+
+nrow(genes2) #How many genes are present in the full bed file that inlcudes all genes?
+nrow(expressed_genes2) #How many genes are included in the bed file that's been filtered for expressed genes?
+genes2$gene_name[!genes2$gene_name %in% expressed_genes2$gene_name] #Which genes are in the annotation file and NOT expressed?
+
+#Write file including full gene boundaries to use for intersecting with bedtools
+#(expressed_genes, file = "references/expressed_gene_boundaries_stranded.bed", sep="\t", col.names = FALSE, row.names = FALSE, quote = FALSE)
+
+# ------- Create boundaries for readthrough detection ------
+
+#Make bed file for genic region.
+##Normalize by taking the 100bp region upstream of the transcription start site for each gene. If the strand is negative, then set the start to the end (b/c it goes the other way) and set end to 100bp upstream
+expressed_genes_downstream_genic_3prime <- expressed_genes2 %>% 
+  mutate(start2 = ifelse(strand == "-", end, start)) %>% 
+  mutate(end2 = ifelse(strand == "-", end - (s-1), start + (s-1))) %>% 
+  select(chromosome, start2, end2, gene_name, V5, strand, database, feature, V9, notes)
+head(expressed_genes_downstream_genic_3prime)
+
+write.table(expressed_genes_downstream_genic_3prime, file = "expressed_genes_downstream_genic_3prime.bed", sep="\t", col.names = FALSE, row.names = FALSE, quote = FALSE)
+
+#Make bed file for upstream region
+#Use window of 100bp, and similarly switch start and stop for genes on the negative strand (b/c they go the other way)
+expressed_genes_upstream_3prime <- expressed_genes2 %>% 
+  mutate(start2 = ifelse(strand == "-", end, start - (s-1))) %>% 
+  mutate(end2 = ifelse(strand == "-", end + (s-1), start)) %>% 
+  select(chromosome, start2, end2, gene_name, V5, strand, database, feature, V9, notes)
+head(expressed_genes_upstream_3prime)  
+  
+write.table(expressed_genes_upstream_3prime, file = "expressed_genes_upstream_3prime.bed", sep="\t", col.names = FALSE, row.names = FALSE, quote = FALSE)
+
+
+#-------------Extra analysis 2: Differential expression combining heated treatments------------------------
+counts <- data.frame(data.matrix(read.table(file="all_counts_stranded.matrix"))) #Import count data to R
+
+head(counts) #Make sure that samples are ordered the same as the vector in the line below (i.e. make sure the samples will be names appropriately)
+
+#rename column names to sample names
+colnames(counts) <- c("h1-4-H1_S10", "h1-4-H2_S12", "h1-4-H3_S3", "h1-4-RT1_S1", "h1-4-RT2_S6", "h1-4-RT3_S8","sh2-H1_S11", "sh2-H2_S2", "sh2-H3_S4", "sh2-RT1_S5", "sh2-RT2_S7", "sh2-RT3_S9")
+
+#Combine heated and unheated treatments into two groups
+group_temp <- factor(c(rep(c("Heated", "Unheated"), each = 3, times = 2)))
+
+y_temp <- DGEList(counts = counts, group = group_temp) #Create DGEList object with groups; #confirmed groups and samples are labeled correctly
+
+keep_temp <- filterByExpr(y_temp) #Filter out lowly expressed genes that will mess with comparisons
+y_temp <- y_temp[keep_temp,,keep.lib.sizes=FALSE]
+
+#Set parameters and fit model
+y_temp <- calcNormFactors(y_temp) #Normalize library sizes to account for some samples having genes that absorb a disproportionate amount of read depth
+design_temp <- model.matrix(~0+group_temp) #Create design matrix (0+ replaces the intercept with a group)
+y_temp <- estimateDisp(y_temp, design_temp, robust=TRUE) #Estimate dispersion for negative binomial model
+
+fit_temp <- glmQLFit(y_temp, design_temp, robust=TRUE) #Fit the negative binomial model
+
+#Make design matrix for all pairwise comparisons
+comparisons_temp <- makeContrasts(Heated_vs_unheated = group_tempHeated - group_tempUnheated, levels=design_temp)
+
+#Combine all comparisons into a single F statistic and p-value and extract top tags
+comps_temp <- glmQLFTest(fit_temp, contrast=comparisons_temp)
+tt_temp <- as.data.frame(topTags(comps_temp, n=15905)) #set n to total number of genes
+nrow(tt_temp[tt_temp$FDR < 0.05,])
+
+
+#Make MDS plot to ensure samples group together
+points_temp <- c(rep(c(19,18), each=3, times=2))
+colors_temp <- c(rep(c("blue", "red"), each = 3, times=2))
+plotMDS(y_temp, col=colors_temp, pch=points_temp)
+legend("top", legend=levels(group_temp), pch=points_temp[c(1,4)], col=colors_temp[c(1,4)], ncol=1)
+
+
+###Isolate genes of interest for filtering
+#Create filtered dataset for genes that are DE in heated treatments
+#Must have run 'Group by temperature section' above
+heated_v_unheated <- tt_temp %>%
+  rownames_to_column(var = "gene") %>% 
+  filter(FDR < 0.01) %>% 
+  filter(logFC > 0) %>% 
+  as_tibble()
+
+#How many genes show readthrough  heated treatments?
+#mean_ratios %>% inner_join(heated_v_unheated, by = "gene") %>% 
+  #Set ratio filters
+#  filter(sh2_H_mean > var1 & h1_4_H_mean > var1 & h1_4_RT_mean < var2 & sh2_RT_mean < var2) %>% 
+#  inner_join(f_boundaries, by = "gene") %>% 
+#  select(gene, chr, start, stop, strand, h1_4_H_mean, sh2_H_mean, h1_4_RT_mean, sh2_RT_mean, logFC) %>% 
+#  mutate_at(6:10, ~ round(., 2)) %>% 
+#  arrange(desc(logFC)) %>% 
+#  summarize(n())
+```
