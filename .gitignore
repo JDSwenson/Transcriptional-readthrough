@@ -3,3 +3,4 @@
 .RData
 .Ruserdata
 .gitignore
+bash scripts/01_sortmerna.sh

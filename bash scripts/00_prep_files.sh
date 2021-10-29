@@ -18,27 +18,21 @@ wait
 sed -i 's/1 CHROMOSOME/Chr1/; s/2 CHROMOSOME/Chr2/; s/3 CHROMOSOME/Chr3/; s/4 CHROMOSOME/Chr4/; s/5 CHROMOSOME/Chr5/; s/mitochondria CHROMOSOME/ChrM/; s/chloroplast CHROMOSOME/ChrC/' references/TAIR10_chr_all.fas
 
 ##Gene annotation
-curl ftp://ftp.arabidopsis.org/home/tair/Genes/TAIR10_genome_release/TAIR10_gff3/TAIR10_GFF3_genes.gff -o references/TAIR10_GFF3_genes.gff
-
-wait
-
-##Convert gff file to gtf for RSEM
-gffread -T references/TAIR10_GFF3_genes.gff -o references/TAIR10_genes.gtf
+curl https://www.arabidopsis.org/download_files/Genes/Araport11_genome_release/Araport11_GFF3_genes_transposons.Mar92021.gff -o references/araport11_Chr.gff
 
 wait
 
 #I.2.2) Index genome file
-hisat2-build TAIR10_ChrAll.fas Tair10idx
-
+hisat2-build TAIR10_ChrAll.fas 00_genome_index/Tair10idx
 
 #I.2.3) Prepare annotation file for downstream use with bedtools
 ##Convert gff annotation file to bed file
-gff2bed < ./references/TAIR10_GFF3_genes.gff > ./references/TAIR10_genes.bed
+gff2bed < ./references/araport11_Chr.gff > ./references/araport11_genes.bed
 
 wait
 
 ##Extract boundaries for full genes
-grep "gene" ./references/TAIR10_genes.bed > ./references/gene_boundaries.bed
+grep "gene" ./references/araport11_genes.bed > ./references/gene_boundaries.bed
 
 #I.2.4) Concatenate reads
 #### Will need to manually adjust input below to adjust for number of lanes. The present script assumes four lanes with the same prefix and single-end reads.
